@@ -1,4 +1,4 @@
-﻿"""FACTRON Omega deterministic execution subsystem."""
+﻿"""FACTRON Omega agent execution subsystem."""
 
 from __future__ import annotations
 
@@ -9,30 +9,19 @@ from typing import Any, Callable, MutableMapping
 
 
 class StepStatus(str, Enum):
-    """Execution status for an individual step."""
+    """Execution state of an individual step."""
 
     SUCCESS = "success"
     FAILED = "failed"
+    SKIPPED = "skipped"
 
 
-@dataclass(frozen=True, slots=True)
-class StepAction:
-    """Registered executable action."""
-
-    name: str
-    handler: Callable[..., Any]
-
-    def __post_init__(self) -> None:
-        if not self.name.strip():
-            raise ValueError("action name cannot be empty")
-
-        if not callable(self.handler):
-            raise TypeError("handler must be callable")
+StepAction = Callable[..., Any]
 
 
 @dataclass(slots=True)
 class ExecutionContext:
-    """Mutable execution state for one Agent run."""
+    """Mutable execution state shared across actions."""
 
     run_id: str
     task: str
@@ -49,7 +38,7 @@ class ExecutionContext:
 
 @dataclass(frozen=True, slots=True)
 class ExecutionResult:
-    """Result of executing one step."""
+    """Immutable result of executing one step."""
 
     status: StepStatus
     output: Any = None
@@ -57,24 +46,21 @@ class ExecutionResult:
     duration_seconds: float = 0.0
 
     def __post_init__(self) -> None:
-        if self.status is StepStatus.SUCCESS and self.error is not None:
-            raise ValueError(
-                "successful execution cannot contain an error"
-            )
-
-        if self.status is StepStatus.FAILED and not self.error:
-            raise ValueError(
-                "failed execution requires an error"
-            )
+        if not isinstance(self.status, StepStatus):
+            raise TypeError("status must be StepStatus")
 
         if self.duration_seconds < 0:
-            raise ValueError(
-                "duration_seconds cannot be negative"
-            )
+            raise ValueError("duration_seconds cannot be negative")
+
+        if self.status is StepStatus.SUCCESS and self.error is not None:
+            raise ValueError("successful result cannot contain an error")
+
+        if self.status is StepStatus.FAILED and not self.error:
+            raise ValueError("failed result requires an error")
 
 
 class StepExecutor:
-    """Registry-backed deterministic step executor."""
+    """Provider-independent action executor."""
 
     def __init__(
         self,
@@ -87,78 +73,62 @@ class StepExecutor:
                 self.register(name, action)
 
     @property
-    def actions(self) -> tuple[str, ...]:
-        """Return registered action names."""
-        return tuple(sorted(self._actions))
+    def actions(self) -> dict[str, StepAction]:
+        """Return a shallow copy of registered actions."""
+        return dict(self._actions)
 
     def register(
         self,
         name: str,
-        action: StepAction | Callable[..., Any],
+        action: StepAction,
     ) -> None:
-        """Register or replace an executable action."""
-        normalized_name = name.strip()
+        """Register an executable action."""
+        normalized = name.strip()
 
-        if not normalized_name:
+        if not normalized:
             raise ValueError("action name cannot be empty")
 
-        if isinstance(action, StepAction):
-            if action.name != normalized_name:
-                raise ValueError(
-                    "StepAction name must match registry name"
-                )
-            normalized_action = action
-        elif callable(action):
-            normalized_action = StepAction(
-                name=normalized_name,
-                handler=action,
-            )
-        else:
-            raise TypeError(
-                "action must be StepAction or callable"
-            )
+        if not callable(action):
+            raise TypeError("action must be callable")
 
-        self._actions[normalized_name] = normalized_action
+        self._actions[normalized] = action
 
     def execute(
         self,
         action: str,
-        arguments: dict[str, Any] | None,
-        context: ExecutionContext,
+        arguments: dict[str, Any] | None = None,
+        context: ExecutionContext | None = None,
     ) -> ExecutionResult:
-        """Execute one registered action."""
-        if not isinstance(context, ExecutionContext):
-            raise TypeError(
-                "context must be an ExecutionContext"
-            )
+        """Execute one registered action safely."""
+        normalized = action.strip()
 
-        action_name = action.strip()
-
-        if not action_name:
+        if not normalized:
             raise ValueError("action cannot be empty")
 
-        start = perf_counter()
+        if context is None:
+            raise ValueError("execution context is required")
 
-        registered = self._actions.get(action_name)
+        if not isinstance(context, ExecutionContext):
+            raise TypeError("context must be ExecutionContext")
 
-        if registered is None:
-            duration = perf_counter() - start
+        callable_action = self._actions.get(normalized)
 
+        if callable_action is None:
             return ExecutionResult(
                 status=StepStatus.FAILED,
-                error=f"Unknown action: {action_name}",
-                duration_seconds=duration,
+                error=f"Unknown action: {normalized}",
             )
 
-        try:
-            kwargs = dict(arguments or {})
+        kwargs = dict(arguments or {})
+        started = perf_counter()
 
-            output = registered.handler(
+        try:
+            output = callable_action(
                 context=context,
                 **kwargs,
             )
 
-            duration = perf_counter() - start
+            duration = perf_counter() - started
 
             return ExecutionResult(
                 status=StepStatus.SUCCESS,
@@ -167,7 +137,7 @@ class StepExecutor:
             )
 
         except Exception as exc:
-            duration = perf_counter() - start
+            duration = perf_counter() - started
 
             return ExecutionResult(
                 status=StepStatus.FAILED,

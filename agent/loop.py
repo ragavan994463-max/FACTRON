@@ -1,27 +1,27 @@
-﻿"""FACTRON Omega agent execution loop."""
+﻿"""FACTRON Omega agent orchestration loop."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any
 from uuid import uuid4
+from typing import Any
 
 from .executor import ExecutionContext, StepExecutor, StepStatus
 from .planner import Plan, Planner, PlanningContext
 
 
 class LoopStatus(str, Enum):
-    """Overall Agent run status."""
+    """Overall AgentLoop state."""
 
     SUCCESS = "success"
     FAILED = "failed"
-    MAX_STEPS = "max_steps"
+    EMPTY = "empty"
 
 
 @dataclass(frozen=True, slots=True)
 class AgentRunResult:
-    """Final result of one Agent execution."""
+    """Immutable result of a complete agent run."""
 
     run_id: str
     status: LoopStatus
@@ -30,14 +30,13 @@ class AgentRunResult:
     completed_steps: int = 0
     failed_steps: int = 0
 
-    @property
-    def success(self) -> bool:
-        """Return whether the Agent completed successfully."""
-        return self.status is LoopStatus.SUCCESS
-
 
 class AgentLoop:
-    """Planner -> executor orchestration boundary."""
+    """Coordinates planning and execution.
+
+    The loop contains no provider-specific intelligence. Planning and
+    execution remain replaceable boundaries.
+    """
 
     def __init__(
         self,
@@ -45,20 +44,17 @@ class AgentLoop:
         executor: StepExecutor,
         max_steps: int = 32,
     ) -> None:
-        if not hasattr(planner, "plan") or not callable(planner.plan):
-            raise TypeError(
-                "planner must provide a callable plan method"
-            )
-
         if not isinstance(executor, StepExecutor):
-            raise TypeError(
-                "executor must be a StepExecutor"
-            )
+            raise TypeError("executor must be StepExecutor")
+
+        if not isinstance(max_steps, int) or isinstance(max_steps, bool):
+            raise TypeError("max_steps must be an integer")
 
         if max_steps <= 0:
-            raise ValueError(
-                "max_steps must be greater than zero"
-            )
+            raise ValueError("max_steps must be greater than zero")
+
+        if not isinstance(planner, Planner):
+            raise TypeError("planner must implement Planner")
 
         self._planner = planner
         self._executor = executor
@@ -69,33 +65,46 @@ class AgentLoop:
         task: str,
         state: dict[str, Any] | None = None,
     ) -> AgentRunResult:
-        """Plan and execute a task."""
-        normalized_task = task.strip()
-
-        if not normalized_task:
+        """Plan and execute one complete task."""
+        if not task.strip():
             raise ValueError("task cannot be empty")
 
         run_id = str(uuid4())
-
-        mutable_state = dict(state or {})
+        initial_state = dict(state or {})
 
         planning_context = PlanningContext(
-            task=normalized_task,
+            task=task,
             run_id=run_id,
-            state=mutable_state,
+            state=initial_state,
         )
 
-        plan: Plan = self._planner.plan(planning_context)
+        try:
+            plan = self._planner.plan(planning_context)
+        except Exception as exc:
+            return AgentRunResult(
+                run_id=run_id,
+                status=LoopStatus.FAILED,
+                errors=(f"PlanningError: {type(exc).__name__}: {exc}",),
+            )
 
         if not isinstance(plan, Plan):
-            raise TypeError(
-                "planner.plan must return a Plan"
+            return AgentRunResult(
+                run_id=run_id,
+                status=LoopStatus.FAILED,
+                errors=("PlanningError: planner returned invalid Plan",),
+            )
+
+        if not plan.steps:
+            return AgentRunResult(
+                run_id=run_id,
+                status=LoopStatus.EMPTY,
             )
 
         execution_context = ExecutionContext(
             run_id=run_id,
-            task=normalized_task,
-            state=mutable_state,
+            task=task,
+            state=initial_state,
+            metadata=dict(plan.metadata),
         )
 
         outputs: list[Any] = []
@@ -103,16 +112,13 @@ class AgentLoop:
         completed = 0
         failed = 0
 
-        for position, step in enumerate(plan.steps):
-            if position >= self._max_steps:
-                return AgentRunResult(
-                    run_id=run_id,
-                    status=LoopStatus.MAX_STEPS,
-                    outputs=tuple(outputs),
-                    errors=tuple(errors),
-                    completed_steps=completed,
-                    failed_steps=failed,
+        for step_number, step in enumerate(plan.steps):
+            if step_number >= self._max_steps:
+                errors.append(
+                    f"Maximum step limit reached: {self._max_steps}"
                 )
+                failed += 1
+                break
 
             result = self._executor.execute(
                 action=step.action,
@@ -121,26 +127,23 @@ class AgentLoop:
             )
 
             if result.status is StepStatus.SUCCESS:
-                completed += 1
                 outputs.append(result.output)
+                completed += 1
             else:
                 failed += 1
-
-                if result.error is not None:
-                    errors.append(result.error)
-
-                return AgentRunResult(
-                    run_id=run_id,
-                    status=LoopStatus.FAILED,
-                    outputs=tuple(outputs),
-                    errors=tuple(errors),
-                    completed_steps=completed,
-                    failed_steps=failed,
+                errors.append(
+                    result.error or f"Step failed: {step.step_id}"
                 )
+
+        status = (
+            LoopStatus.SUCCESS
+            if failed == 0 and completed > 0
+            else LoopStatus.FAILED
+        )
 
         return AgentRunResult(
             run_id=run_id,
-            status=LoopStatus.SUCCESS,
+            status=status,
             outputs=tuple(outputs),
             errors=tuple(errors),
             completed_steps=completed,
