@@ -1,36 +1,59 @@
-﻿"""FACTRON agent subsystem.
+﻿"""FACTRON Omega Agent subsystem.
 
-The agent package provides the orchestration primitives for planning,
-execution, observation, and controlled iteration.  Model-specific logic
-remains outside this package so the architecture stays provider-agnostic.
+The Agent subsystem coordinates:
+
+    planning
+        ↓
+    execution
+        ↓
+    observation
+        ↓
+    loop control
+
+The implementation is provider-independent and deliberately
+separated from intelligence, knowledge, memory, retrieval,
+tools, and application layers.
+
+No model provider is hard-coded here.
 """
 
+from .planner import (
+    PlanStepStatus,
+    PlanStep,
+    Plan,
+    PlanningContext,
+    Planner,
+    DeterministicPlanner,
+)
+
 from .executor import (
+    StepStatus,
+    StepAction,
     ExecutionContext,
     ExecutionResult,
     StepExecutor,
-    StepStatus,
-)
-from .loop import AgentLoop, AgentRunResult, LoopStatus
-from .planner import (
-    Plan,
-    PlanStep,
-    PlanStepStatus,
-    Planner,
-    PlanningContext,
 )
 
+from .loop import (
+    LoopStatus,
+    AgentRunResult,
+    AgentLoop,
+)
+
+
 __all__ = [
-    "AgentLoop",
-    "AgentRunResult",
+    "PlanStepStatus",
+    "PlanStep",
+    "Plan",
+    "PlanningContext",
+    "Planner",
+    "DeterministicPlanner",
+    "StepStatus",
+    "StepAction",
     "ExecutionContext",
     "ExecutionResult",
-    "LoopStatus",
-    "Plan",
-    "PlanStep",
-    "PlanStepStatus",
-    "Planner",
-    "PlanningContext",
     "StepExecutor",
-    "StepStatus",
+    "LoopStatus",
+    "AgentRunResult",
+    "AgentLoop",
 ]

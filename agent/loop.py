@@ -1,26 +1,36 @@
-﻿"""Controlled execution loop for FACTRON agents."""
+﻿"""Agent planning/execution loop for FACTRON Omega."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from enum import StrEnum
-from typing import Any, Mapping
+from dataclasses import dataclass
+from enum import Enum
+from typing import Any
+from uuid import uuid4
 
-from .executor import ExecutionContext, StepExecutor, StepStatus
-from .planner import Plan, PlanStepStatus, Planner
+from .executor import (
+    ExecutionContext,
+    StepExecutor,
+    StepStatus,
+)
+from .planner import (
+    PlanStepStatus,
+    Planner,
+    PlanningContext,
+)
 
 
-class LoopStatus(StrEnum):
-    """Final state of an agent run."""
+class LoopStatus(str, Enum):
+    """Overall Agent run status."""
 
-    COMPLETED = "completed"
+    SUCCESS = "success"
     FAILED = "failed"
-    BLOCKED = "blocked"
+    PARTIAL = "partial"
+    EMPTY = "empty"
 
 
 @dataclass(frozen=True, slots=True)
 class AgentRunResult:
-    """Immutable summary of one complete agent run."""
+    """Immutable summary of an Agent run."""
 
     run_id: str
     status: LoopStatus
@@ -29,98 +39,152 @@ class AgentRunResult:
     completed_steps: int = 0
     failed_steps: int = 0
 
+    def __post_init__(self) -> None:
+        if not self.run_id.strip():
+            raise ValueError(
+                "run_id cannot be empty"
+            )
 
-@dataclass(slots=True)
+        object.__setattr__(
+            self,
+            "outputs",
+            tuple(self.outputs),
+        )
+
+        object.__setattr__(
+            self,
+            "errors",
+            tuple(self.errors),
+        )
+
+        if self.completed_steps < 0:
+            raise ValueError(
+                "completed_steps cannot be negative"
+            )
+
+        if self.failed_steps < 0:
+            raise ValueError(
+                "failed_steps cannot be negative"
+            )
+
+
 class AgentLoop:
-    """Orchestrate planning and sequential step execution.
+    """Coordinates planning and execution."""
 
-    This is the deterministic orchestration layer.  A future reasoning
-    engine can produce the Plan, while this loop remains responsible for
-    executing that plan and recording outcomes.
-    """
+    def __init__(
+        self,
+        planner: Planner,
+        executor: StepExecutor,
+        max_steps: int = 32,
+    ) -> None:
+        if not isinstance(executor, StepExecutor):
+            raise TypeError(
+                "executor must be a StepExecutor"
+            )
 
-    planner: Planner
-    executor: StepExecutor
-    max_steps: int = 32
+        if not isinstance(max_steps, int):
+            raise TypeError(
+                "max_steps must be an integer"
+            )
+
+        if max_steps <= 0:
+            raise ValueError(
+                "max_steps must be greater than zero"
+            )
+
+        if not isinstance(planner, Planner):
+            raise TypeError(
+                "planner must satisfy the Planner protocol"
+            )
+
+        self.planner = planner
+        self.executor = executor
+        self.max_steps = max_steps
 
     def run(
         self,
-        *,
-        run_id: str,
         task: str,
-        context_state: Mapping[str, Any] | None = None,
+        state: dict[str, Any] | None = None,
+        run_id: str | None = None,
     ) -> AgentRunResult:
-        """Plan and execute a task with bounded step count."""
-        if not run_id.strip():
-            raise ValueError("run_id cannot be empty.")
-        if not task.strip():
-            raise ValueError("task cannot be empty.")
-        if self.max_steps <= 0:
-            raise ValueError("max_steps must be greater than zero.")
+        """Plan and execute one Agent run."""
+        if not isinstance(task, str):
+            raise TypeError("task must be a string")
 
-        context = ExecutionContext(
-            run_id=run_id,
-            task=task,
-            state=dict(context_state or {}),
+        if not task.strip():
+            raise ValueError("task cannot be empty")
+
+        actual_run_id = (
+            run_id.strip()
+            if isinstance(run_id, str) and run_id.strip()
+            else str(uuid4())
         )
 
-        plan = self.planner.create_plan(task, context)
+        initial_state = dict(state or {})
+
+        planning_context = PlanningContext(
+            task=task,
+            run_id=actual_run_id,
+            state=initial_state,
+        )
+
+        plan = self.planner.plan(planning_context)
 
         if not plan.steps:
             return AgentRunResult(
-                run_id=run_id,
-                status=LoopStatus.BLOCKED,
+                run_id=actual_run_id,
+                status=LoopStatus.EMPTY,
             )
+
+        if len(plan.steps) > self.max_steps:
+            raise ValueError(
+                "Plan exceeds configured max_steps"
+            )
+
+        execution_context = ExecutionContext(
+            run_id=actual_run_id,
+            task=task,
+            state=initial_state,
+            metadata={
+                "goal": plan.goal,
+                **dict(plan.metadata),
+            },
+        )
 
         outputs: list[Any] = []
         errors: list[str] = []
         completed = 0
         failed = 0
 
-        for index, step in enumerate(plan.steps):
-            if index >= self.max_steps:
-                errors.append("Agent step limit reached.")
-                return AgentRunResult(
-                    run_id=run_id,
-                    status=LoopStatus.FAILED,
-                    outputs=tuple(outputs),
-                    errors=tuple(errors),
-                    completed_steps=completed,
-                    failed_steps=failed,
-                )
-
+        for step in plan.steps:
             if step.status is PlanStepStatus.SKIPPED:
                 continue
 
             result = self.executor.execute(
-                step.action,
-                context,
-                step.arguments,
+                action_name=step.action,
+                arguments=dict(step.arguments),
+                context=execution_context,
             )
 
-            if result.status is StepStatus.SUCCEEDED:
-                step.status = PlanStepStatus.SUCCEEDED
-                outputs.append(result.output)
+            if result.status is StepStatus.SUCCESS:
                 completed += 1
-                context.state[f"step_{step.step_id}"] = result.output
+                outputs.append(result.output)
             else:
-                step.status = PlanStepStatus.FAILED
                 failed += 1
+
                 if result.error:
                     errors.append(result.error)
 
-                return AgentRunResult(
-                    run_id=run_id,
-                    status=LoopStatus.FAILED,
-                    outputs=tuple(outputs),
-                    errors=tuple(errors),
-                    completed_steps=completed,
-                    failed_steps=failed,
-                )
+        if failed == 0:
+            status = LoopStatus.SUCCESS
+        elif completed == 0:
+            status = LoopStatus.FAILED
+        else:
+            status = LoopStatus.PARTIAL
 
         return AgentRunResult(
-            run_id=run_id,
-            status=LoopStatus.COMPLETED,
+            run_id=actual_run_id,
+            status=status,
             outputs=tuple(outputs),
             errors=tuple(errors),
             completed_steps=completed,

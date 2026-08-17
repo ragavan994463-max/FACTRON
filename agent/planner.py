@@ -1,27 +1,25 @@
-﻿"""Planning contracts for FACTRON agents."""
+﻿"""Planning contracts and deterministic planning for FACTRON Omega."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import StrEnum
-from typing import Any, Mapping, Protocol
-
-from .executor import ExecutionContext
+from enum import Enum
+from typing import Any, Mapping, Protocol, runtime_checkable
 
 
-class PlanStepStatus(StrEnum):
-    """Lifecycle states for a planned step."""
+class PlanStepStatus(str, Enum):
+    """Lifecycle state of a planned step."""
 
     PENDING = "pending"
-    RUNNING = "running"
-    SUCCEEDED = "succeeded"
+    READY = "ready"
+    COMPLETED = "completed"
     FAILED = "failed"
     SKIPPED = "skipped"
 
 
-@dataclass(slots=True)
+@dataclass(frozen=True, slots=True)
 class PlanStep:
-    """One atomic action in an agent plan."""
+    """Immutable description of one executable plan step."""
 
     step_id: str
     action: str
@@ -31,14 +29,26 @@ class PlanStep:
 
     def __post_init__(self) -> None:
         if not self.step_id.strip():
-            raise ValueError("step_id cannot be empty.")
+            raise ValueError("step_id cannot be empty")
+
         if not self.action.strip():
-            raise ValueError("action cannot be empty.")
+            raise ValueError("action cannot be empty")
+
+        object.__setattr__(
+            self,
+            "arguments",
+            dict(self.arguments),
+        )
+
+        if not isinstance(self.status, PlanStepStatus):
+            raise TypeError(
+                "status must be a PlanStepStatus"
+            )
 
 
 @dataclass(frozen=True, slots=True)
 class Plan:
-    """Ordered execution plan."""
+    """Immutable execution plan."""
 
     goal: str
     steps: tuple[PlanStep, ...]
@@ -46,55 +56,99 @@ class Plan:
 
     def __post_init__(self) -> None:
         if not self.goal.strip():
-            raise ValueError("Plan goal cannot be empty.")
+            raise ValueError("goal cannot be empty")
 
-        ids = [step.step_id for step in self.steps]
-        if len(ids) != len(set(ids)):
-            raise ValueError("Plan step IDs must be unique.")
+        normalized_steps = tuple(self.steps)
+
+        for step in normalized_steps:
+            if not isinstance(step, PlanStep):
+                raise TypeError(
+                    "all plan steps must be PlanStep instances"
+                )
+
+        object.__setattr__(
+            self,
+            "steps",
+            normalized_steps,
+        )
+
+        object.__setattr__(
+            self,
+            "metadata",
+            dict(self.metadata),
+        )
 
 
 @dataclass(frozen=True, slots=True)
 class PlanningContext:
-    """Read-only planning information."""
+    """Immutable input supplied to a planner."""
 
     task: str
     run_id: str
     state: Mapping[str, Any]
 
+    def __post_init__(self) -> None:
+        if not self.task.strip():
+            raise ValueError("task cannot be empty")
 
+        if not self.run_id.strip():
+            raise ValueError("run_id cannot be empty")
+
+        object.__setattr__(
+            self,
+            "state",
+            dict(self.state),
+        )
+
+
+@runtime_checkable
 class Planner(Protocol):
-    """Contract implemented by deterministic or model-backed planners."""
+    """Runtime-checkable planner interface."""
 
-    def create_plan(
+    def plan(
         self,
-        task: str,
-        context: ExecutionContext,
+        context: PlanningContext,
     ) -> Plan:
-        """Create an executable plan for a task."""
+        """Create an execution plan."""
+        ...
 
 
 class DeterministicPlanner:
-    """Minimal planner used for infrastructure validation.
+    """Minimal deterministic planner.
 
-    Real reasoning will be connected later through FACTRON's intelligence
-    layer.  This class exists only to prove that the orchestration boundary
-    works before a model provider is introduced.
+    This planner intentionally performs no LLM call.
+
+    It provides a stable foundation for later intelligence-driven
+    planning while preserving the Agent architecture.
     """
 
-    def create_plan(
+    def plan(
         self,
-        task: str,
-        context: ExecutionContext,
+        context: PlanningContext,
     ) -> Plan:
-        return Plan(
-            goal=task,
-            steps=(
-                PlanStep(
-                    step_id="validation-1",
-                    action="factron.validate_task",
-                    arguments={"task": task},
-                    description="Validate that the agent received a task.",
-                ),
+        if not isinstance(context, PlanningContext):
+            raise TypeError(
+                "context must be a PlanningContext"
+            )
+
+        step = PlanStep(
+            step_id="step-1",
+            action="observe",
+            arguments={
+                "task": context.task,
+            },
+            description=(
+                "Observe the current task context before "
+                "performing downstream actions."
             ),
-            metadata={"planner": "deterministic"},
+            status=PlanStepStatus.READY,
+        )
+
+        return Plan(
+            goal=context.task,
+            steps=(step,),
+            metadata={
+                "planner": self.__class__.__name__,
+                "run_id": context.run_id,
+            },
         )
