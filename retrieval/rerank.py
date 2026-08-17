@@ -1,16 +1,16 @@
-﻿"""Deterministic retrieval reranking for FACTRON."""
+﻿"""Deterministic retrieval reranking for FACTRON Omega."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable
+from typing import Any
 
 from .search import RetrievalCandidate
 
 
 @dataclass(frozen=True, slots=True)
 class RerankedResult:
-    """Immutable reranked retrieval result."""
+    """A retrieval candidate after deterministic reranking."""
 
     candidate: RetrievalCandidate
     score: float
@@ -37,121 +37,108 @@ class RerankedResult:
 
 
 class RetrievalReranker:
-    """Apply deterministic relevance normalization.
+    """Provider-independent deterministic reranker.
 
-    The reranker intentionally does not require embeddings or an LLM.
-    A future semantic reranker can implement this boundary without
-    changing the retrieval pipeline contract.
+    Current scoring combines:
+
+    1. lexical frequency
+    2. query-term coverage
+    3. deterministic tie-breaking
+
+    This is intentionally lightweight. A learned reranker can
+    replace this implementation later behind the same boundary.
     """
-
-    def __init__(
-        self,
-        *,
-        exact_match_bonus: float = 0.15,
-        multi_term_bonus: float = 0.10,
-    ) -> None:
-        if exact_match_bonus < 0:
-            raise ValueError(
-                "exact_match_bonus cannot be negative"
-            )
-
-        if multi_term_bonus < 0:
-            raise ValueError(
-                "multi_term_bonus cannot be negative"
-            )
-
-        self._exact_match_bonus = float(
-            exact_match_bonus
-        )
-        self._multi_term_bonus = float(
-            multi_term_bonus
-        )
 
     def rerank(
         self,
-        candidates: Iterable[
-            RetrievalCandidate
-        ],
+        candidates: tuple[RetrievalCandidate, ...] | list[RetrievalCandidate],
+        limit: int | None = None,
     ) -> tuple[RerankedResult, ...]:
-        """Rerank candidates into normalized [0, 1] scores."""
+        """Rerank retrieval candidates deterministically."""
 
-        candidate_list = tuple(candidates)
+        candidate_list = list(candidates)
+
+        for candidate in candidate_list:
+            if not isinstance(
+                candidate,
+                RetrievalCandidate,
+            ):
+                raise TypeError(
+                    "all candidates must be RetrievalCandidate instances"
+                )
+
+        if limit is not None and limit <= 0:
+            raise ValueError(
+                "limit must be greater than zero"
+            )
 
         if not candidate_list:
             return ()
 
-        maximum = max(
+        max_lexical = max(
             candidate.lexical_score
             for candidate in candidate_list
         )
 
-        if maximum <= 0:
-            maximum = 1.0
+        max_coverage = max(
+            len(candidate.matched_terms)
+            for candidate in candidate_list
+        )
+
+        def score(candidate: RetrievalCandidate) -> float:
+            lexical_component = (
+                candidate.lexical_score / max_lexical
+                if max_lexical > 0
+                else 0.0
+            )
+
+            coverage_component = (
+                len(candidate.matched_terms) / max_coverage
+                if max_coverage > 0
+                else 0.0
+            )
+
+            combined = (
+                lexical_component * 0.70
+                + coverage_component * 0.30
+            )
+
+            return max(
+                0.0,
+                min(1.0, combined),
+            )
 
         scored: list[
-            tuple[
-                float,
-                RetrievalCandidate,
-            ]
-        ] = []
-
-        for candidate in candidate_list:
-            base = (
-                candidate.lexical_score
-                / maximum
-            )
-
-            matched_count = len(
-                candidate.matched_terms
-            )
-
-            multi_term_bonus = (
-                self._multi_term_bonus
-                if matched_count >= 2
-                else 0.0
-            )
-
-            text_lower = (
-                candidate.record.text.lower()
-            )
-
-            exact_match_bonus = (
-                self._exact_match_bonus
-                if any(
-                    text_lower == term
-                    for term in candidate.matched_terms
-                )
-                else 0.0
-            )
-
-            score = min(
-                1.0,
-                base
-                + multi_term_bonus
-                + exact_match_bonus,
-            )
-
-            scored.append(
-                (score, candidate)
-            )
+            tuple[float, RetrievalCandidate]
+        ] = [
+            (score(candidate), candidate)
+            for candidate in candidate_list
+        ]
 
         scored.sort(
             key=lambda item: (
                 -item[0],
+                -item[1].lexical_score,
                 item[1].record.chunk_index,
                 str(item[1].record.record_id),
             )
         )
 
-        return tuple(
-            RerankedResult(
-                candidate=candidate,
-                score=score,
-                rank=rank,
+        if limit is not None:
+            scored = scored[:limit]
+
+        results: list[RerankedResult] = []
+
+        for position, (item_score, candidate) in enumerate(
+            scored,
+            start=1,
+        ):
+            results.append(
+                RerankedResult(
+                    candidate=candidate,
+                    score=item_score,
+                    rank=position,
+                )
             )
-            for rank, (score, candidate)
-            in enumerate(
-                scored,
-                start=1,
-            )
-        )
+
+        return tuple(results)

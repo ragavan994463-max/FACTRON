@@ -1,30 +1,27 @@
 ﻿"""FACTRON Omega retrieval subsystem.
 
-Retrieval converts a user/query signal into relevant knowledge records.
+Retrieval is intentionally provider-independent.
 
-Architecture:
+Pipeline:
 
-    Query
-      |
-      v
-    Search
-      |
-      v
-    Candidate Records
-      |
-      v
-    Reranking
-      |
-      v
-    Grounding
-      |
-      v
-    Retrieval Context
+    KnowledgeIndex
+        ↓
+    RetrievalSearcher
+        ↓
+    RetrievalCandidate
+        ↓
+    RetrievalReranker
+        ↓
+    RerankedResult
+        ↓
+    RetrievalGrounder
+        ↓
+    GroundedContext
 
-The subsystem is provider-independent and deterministic.
-
-No LLM, embedding API, vector database, network service, or external
-credential is required by the core retrieval contracts.
+The subsystem performs deterministic lexical retrieval today.
+Vector databases, embeddings, and model-specific retrieval can
+be introduced behind these contracts later without changing the
+public architecture.
 """
 
 from .search import (

@@ -1,33 +1,30 @@
-﻿"""Knowledge grounding and context assembly for FACTRON."""
+﻿"""Grounded context construction for FACTRON Omega."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable
-
-from .rerank import RerankedResult
+from typing import Any, Mapping
+from uuid import UUID
 
 
 @dataclass(frozen=True, slots=True)
 class GroundingSource:
-    """Auditable source attached to grounded context."""
+    """Auditable source attribution for grounded context."""
 
-    record_id: str
-    document_id: str
+    record_id: UUID
+    document_id: UUID
     source_id: str
     rank: int
     score: float
+    chunk_index: int
+    metadata: Mapping[str, Any]
 
     def __post_init__(self) -> None:
-        if not self.record_id.strip():
-            raise ValueError(
-                "record_id cannot be empty"
-            )
+        if not isinstance(self.record_id, UUID):
+            raise TypeError("record_id must be a UUID")
 
-        if not self.document_id.strip():
-            raise ValueError(
-                "document_id cannot be empty"
-            )
+        if not isinstance(self.document_id, UUID):
+            raise TypeError("document_id must be a UUID")
 
         if not self.source_id.strip():
             raise ValueError(
@@ -44,14 +41,25 @@ class GroundingSource:
                 "score must be between 0 and 1"
             )
 
+        if self.chunk_index < 0:
+            raise ValueError(
+                "chunk_index cannot be negative"
+            )
+
+        object.__setattr__(
+            self,
+            "metadata",
+            dict(self.metadata),
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class GroundedContext:
-    """Immutable retrieval context with source attribution."""
+    """Immutable, auditable context prepared for downstream reasoning."""
 
     query: str
     text: str
-    sources: tuple[GroundingSource, ...] = ()
+    sources: tuple[GroundingSource, ...]
 
     def __post_init__(self) -> None:
         if not self.query.strip():
@@ -61,8 +69,20 @@ class GroundedContext:
 
         if not self.text.strip():
             raise ValueError(
-                "grounded context text cannot be empty"
+                "grounded text cannot be empty"
             )
+
+        object.__setattr__(
+            self,
+            "query",
+            self.query.strip(),
+        )
+
+        object.__setattr__(
+            self,
+            "text",
+            self.text.strip(),
+        )
 
         object.__setattr__(
             self,
@@ -72,38 +92,17 @@ class GroundedContext:
 
 
 class RetrievalGrounder:
-    """Convert reranked retrieval results into auditable context."""
-
-    def __init__(
-        self,
-        *,
-        separator: str = "\n\n---\n\n",
-    ) -> None:
-        if not isinstance(separator, str):
-            raise TypeError(
-                "separator must be a string"
-            )
-
-        if not separator:
-            raise ValueError(
-                "separator cannot be empty"
-            )
-
-        self._separator = separator
+    """Build deterministic, auditable context from reranked results."""
 
     def ground(
         self,
         query: str,
-        results: Iterable[
-            RerankedResult
-        ],
+        results: tuple[Any, ...] | list[Any],
+        max_chars: int = 12000,
     ) -> GroundedContext:
-        """Build a source-attributed context block."""
+        """Construct grounded context from reranked results."""
 
-        if not isinstance(query, str):
-            raise TypeError(
-                "query must be a string"
-            )
+        from .rerank import RerankedResult
 
         normalized_query = query.strip()
 
@@ -112,61 +111,117 @@ class RetrievalGrounder:
                 "query cannot be empty"
             )
 
-        result_list = tuple(results)
+        if max_chars <= 0:
+            raise ValueError(
+                "max_chars must be greater than zero"
+            )
+
+        result_list = list(results)
+
+        for result in result_list:
+            if not isinstance(result, RerankedResult):
+                raise TypeError(
+                    "all results must be RerankedResult instances"
+                )
 
         if not result_list:
             raise ValueError(
-                "cannot ground empty retrieval results"
+                "cannot ground an empty result set"
             )
 
-        blocks: list[str] = []
+        sections: list[str] = []
         sources: list[GroundingSource] = []
+        current_length = 0
 
         for result in result_list:
             record = result.candidate.record
 
-            blocks.append(
-                (
-                    f"[Source {result.rank}]\n"
-                    f"{record.text.strip()}"
+            source_header = (
+                f"[Source {result.rank}] "
+                f"source_id={record.source_id} "
+                f"document_id={record.document_id} "
+                f"chunk={record.chunk_index} "
+                f"score={result.score:.4f}"
+            )
+
+            section = (
+                source_header
+                + "\n"
+                + record.text.strip()
+            )
+
+            separator_length = (
+                2 if sections else 0
+            )
+
+            if (
+                current_length
+                + separator_length
+                + len(section)
+                > max_chars
+            ):
+                remaining = (
+                    max_chars
+                    - current_length
+                    - separator_length
                 )
+
+                if remaining <= 0:
+                    break
+
+                truncated = section[:remaining].rstrip()
+
+                if truncated:
+                    sections.append(truncated)
+                    current_length += (
+                        separator_length
+                        + len(truncated)
+                    )
+
+                break
+
+            sections.append(section)
+            current_length += (
+                separator_length
+                + len(section)
             )
 
             sources.append(
                 GroundingSource(
-                    record_id=str(
-                        record.record_id
-                    ),
-                    document_id=str(
-                        record.document_id
-                    ),
+                    record_id=record.record_id,
+                    document_id=record.document_id,
                     source_id=record.source_id,
                     rank=result.rank,
                     score=result.score,
+                    chunk_index=record.chunk_index,
+                    metadata=record.metadata,
                 )
+            )
+
+        if not sections:
+            raise ValueError(
+                "no context could be constructed within max_chars"
             )
 
         return GroundedContext(
             query=normalized_query,
-            text=self._separator.join(blocks),
+            text="\n\n".join(sections),
             sources=tuple(sources),
         )
 
     def ground_optional(
         self,
         query: str,
-        results: Iterable[
-            RerankedResult
-        ],
+        results: tuple[Any, ...] | list[Any],
+        max_chars: int = 12000,
     ) -> GroundedContext | None:
-        """Return None when no retrieval results exist."""
+        """Return grounded context or None for an empty result set."""
 
-        result_list = tuple(results)
-
-        if not result_list:
+        if not results:
             return None
 
         return self.ground(
-            query,
-            result_list,
+            query=query,
+            results=results,
+            max_chars=max_chars,
         )
