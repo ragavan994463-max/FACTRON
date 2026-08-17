@@ -1,21 +1,4 @@
-﻿"""FACTRON Omega Agent subsystem.
-
-The Agent subsystem coordinates:
-
-    planning
-        ↓
-    execution
-        ↓
-    observation
-        ↓
-    loop control
-
-The implementation is provider-independent and deliberately
-separated from intelligence, knowledge, memory, retrieval,
-tools, and application layers.
-
-No model provider is hard-coded here.
-"""
+﻿"""FACTRON Omega Agent subsystem public API."""
 
 from .planner import (
     PlanStepStatus,
@@ -39,7 +22,6 @@ from .loop import (
     AgentRunResult,
     AgentLoop,
 )
-
 
 __all__ = [
     "PlanStepStatus",

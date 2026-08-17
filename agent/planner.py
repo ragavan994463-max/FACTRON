@@ -1,25 +1,24 @@
-﻿"""Planning contracts and deterministic planning for FACTRON Omega."""
+﻿"""FACTRON Omega deterministic planning subsystem."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Mapping, Protocol, runtime_checkable
+from typing import Any, Mapping
 
 
 class PlanStepStatus(str, Enum):
-    """Lifecycle state of a planned step."""
+    """Lifecycle status for a planned step."""
 
     PENDING = "pending"
-    READY = "ready"
+    RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
-    SKIPPED = "skipped"
 
 
 @dataclass(frozen=True, slots=True)
 class PlanStep:
-    """Immutable description of one executable plan step."""
+    """One executable step in an Agent plan."""
 
     step_id: str
     action: str
@@ -40,11 +39,6 @@ class PlanStep:
             dict(self.arguments),
         )
 
-        if not isinstance(self.status, PlanStepStatus):
-            raise TypeError(
-                "status must be a PlanStepStatus"
-            )
-
 
 @dataclass(frozen=True, slots=True)
 class Plan:
@@ -60,28 +54,29 @@ class Plan:
 
         normalized_steps = tuple(self.steps)
 
+        if not normalized_steps:
+            raise ValueError("plan must contain at least one step")
+
+        seen: set[str] = set()
+
         for step in normalized_steps:
             if not isinstance(step, PlanStep):
-                raise TypeError(
-                    "all plan steps must be PlanStep instances"
+                raise TypeError("all plan steps must be PlanStep instances")
+
+            if step.step_id in seen:
+                raise ValueError(
+                    f"duplicate step_id: {step.step_id}"
                 )
 
-        object.__setattr__(
-            self,
-            "steps",
-            normalized_steps,
-        )
+            seen.add(step.step_id)
 
-        object.__setattr__(
-            self,
-            "metadata",
-            dict(self.metadata),
-        )
+        object.__setattr__(self, "steps", normalized_steps)
+        object.__setattr__(self, "metadata", dict(self.metadata))
 
 
 @dataclass(frozen=True, slots=True)
 class PlanningContext:
-    """Immutable input supplied to a planner."""
+    """Context supplied to a planner."""
 
     task: str
     run_id: str
@@ -94,61 +89,44 @@ class PlanningContext:
         if not self.run_id.strip():
             raise ValueError("run_id cannot be empty")
 
-        object.__setattr__(
-            self,
-            "state",
-            dict(self.state),
-        )
+        object.__setattr__(self, "state", dict(self.state))
 
 
-@runtime_checkable
-class Planner(Protocol):
-    """Runtime-checkable planner interface."""
+class Planner:
+    """Planner protocol boundary."""
 
-    def plan(
-        self,
-        context: PlanningContext,
-    ) -> Plan:
+    def plan(self, context: PlanningContext) -> Plan:
         """Create an execution plan."""
-        ...
+        raise NotImplementedError
 
 
-class DeterministicPlanner:
-    """Minimal deterministic planner.
+class DeterministicPlanner(Planner):
+    """Simple deterministic planner for architecture validation.
 
-    This planner intentionally performs no LLM call.
-
-    It provides a stable foundation for later intelligence-driven
-    planning while preserving the Agent architecture.
+    The planner deliberately does not call an LLM.
+    Real reasoning can be connected above this boundary later.
     """
 
-    def plan(
-        self,
-        context: PlanningContext,
-    ) -> Plan:
+    def plan(self, context: PlanningContext) -> Plan:
         if not isinstance(context, PlanningContext):
             raise TypeError(
                 "context must be a PlanningContext"
             )
 
-        step = PlanStep(
-            step_id="step-1",
-            action="observe",
-            arguments={
-                "task": context.task,
-            },
-            description=(
-                "Observe the current task context before "
-                "performing downstream actions."
-            ),
-            status=PlanStepStatus.READY,
-        )
+        task = context.task.strip()
 
         return Plan(
-            goal=context.task,
-            steps=(step,),
+            goal=task,
+            steps=(
+                PlanStep(
+                    step_id="step-1",
+                    action="record_task",
+                    arguments={"task": task},
+                    description="Record the requested task.",
+                ),
+            ),
             metadata={
-                "planner": self.__class__.__name__,
+                "planner": "deterministic",
                 "run_id": context.run_id,
             },
         )

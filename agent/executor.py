@@ -1,4 +1,4 @@
-﻿"""Execution contracts and action registry for FACTRON Omega."""
+﻿"""FACTRON Omega deterministic execution subsystem."""
 
 from __future__ import annotations
 
@@ -9,16 +9,15 @@ from typing import Any, Callable, MutableMapping
 
 
 class StepStatus(str, Enum):
-    """Execution state of a plan step."""
+    """Execution status for an individual step."""
 
     SUCCESS = "success"
     FAILED = "failed"
-    SKIPPED = "skipped"
 
 
 @dataclass(frozen=True, slots=True)
 class StepAction:
-    """Immutable executable action contract."""
+    """Registered executable action."""
 
     name: str
     handler: Callable[..., Any]
@@ -28,23 +27,17 @@ class StepAction:
             raise ValueError("action name cannot be empty")
 
         if not callable(self.handler):
-            raise TypeError(
-                "handler must be callable"
-            )
+            raise TypeError("handler must be callable")
 
 
 @dataclass(slots=True)
 class ExecutionContext:
-    """Mutable state available during execution."""
+    """Mutable execution state for one Agent run."""
 
     run_id: str
     task: str
-    state: MutableMapping[str, Any] = field(
-        default_factory=dict
-    )
-    metadata: MutableMapping[str, Any] = field(
-        default_factory=dict
-    )
+    state: MutableMapping[str, Any] = field(default_factory=dict)
+    metadata: MutableMapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.run_id.strip():
@@ -56,7 +49,7 @@ class ExecutionContext:
 
 @dataclass(frozen=True, slots=True)
 class ExecutionResult:
-    """Immutable result of one executed step."""
+    """Result of executing one step."""
 
     status: StepStatus
     output: Any = None
@@ -64,9 +57,14 @@ class ExecutionResult:
     duration_seconds: float = 0.0
 
     def __post_init__(self) -> None:
-        if not isinstance(self.status, StepStatus):
-            raise TypeError(
-                "status must be a StepStatus"
+        if self.status is StepStatus.SUCCESS and self.error is not None:
+            raise ValueError(
+                "successful execution cannot contain an error"
+            )
+
+        if self.status is StepStatus.FAILED and not self.error:
+            raise ValueError(
+                "failed execution requires an error"
             )
 
         if self.duration_seconds < 0:
@@ -74,92 +72,93 @@ class ExecutionResult:
                 "duration_seconds cannot be negative"
             )
 
-        if self.status is StepStatus.SUCCESS:
-            if self.error is not None:
-                raise ValueError(
-                    "successful execution cannot contain an error"
-                )
-
 
 class StepExecutor:
-    """Provider-independent action executor."""
+    """Registry-backed deterministic step executor."""
 
     def __init__(
         self,
         actions: MutableMapping[str, StepAction] | None = None,
     ) -> None:
-        self._actions: dict[str, StepAction] = dict(
-            actions or {}
-        )
+        self._actions: dict[str, StepAction] = {}
+
+        if actions is not None:
+            for name, action in actions.items():
+                self.register(name, action)
 
     @property
-    def actions(self) -> dict[str, StepAction]:
-        """Return a copy of the registered action map."""
-        return dict(self._actions)
+    def actions(self) -> tuple[str, ...]:
+        """Return registered action names."""
+        return tuple(sorted(self._actions))
 
     def register(
         self,
-        action: StepAction,
+        name: str,
+        action: StepAction | Callable[..., Any],
     ) -> None:
         """Register or replace an executable action."""
-        if not isinstance(action, StepAction):
+        normalized_name = name.strip()
+
+        if not normalized_name:
+            raise ValueError("action name cannot be empty")
+
+        if isinstance(action, StepAction):
+            if action.name != normalized_name:
+                raise ValueError(
+                    "StepAction name must match registry name"
+                )
+            normalized_action = action
+        elif callable(action):
+            normalized_action = StepAction(
+                name=normalized_name,
+                handler=action,
+            )
+        else:
             raise TypeError(
-                "action must be a StepAction"
+                "action must be StepAction or callable"
             )
 
-        self._actions[action.name] = action
-
-    def unregister(
-        self,
-        name: str,
-    ) -> None:
-        """Remove an action if it exists."""
-        if not name.strip():
-            raise ValueError(
-                "action name cannot be empty"
-            )
-
-        self._actions.pop(name, None)
+        self._actions[normalized_name] = normalized_action
 
     def execute(
         self,
-        action_name: str,
-        arguments: dict[str, Any],
+        action: str,
+        arguments: dict[str, Any] | None,
         context: ExecutionContext,
     ) -> ExecutionResult:
-        """Execute one registered action safely."""
-        if not action_name.strip():
-            raise ValueError(
-                "action_name cannot be empty"
-            )
-
-        if not isinstance(arguments, dict):
-            raise TypeError(
-                "arguments must be a dictionary"
-            )
-
+        """Execute one registered action."""
         if not isinstance(context, ExecutionContext):
             raise TypeError(
                 "context must be an ExecutionContext"
             )
 
-        action = self._actions.get(action_name)
+        action_name = action.strip()
 
-        if action is None:
+        if not action_name:
+            raise ValueError("action cannot be empty")
+
+        start = perf_counter()
+
+        registered = self._actions.get(action_name)
+
+        if registered is None:
+            duration = perf_counter() - start
+
             return ExecutionResult(
                 status=StepStatus.FAILED,
                 error=f"Unknown action: {action_name}",
+                duration_seconds=duration,
             )
-
-        started = perf_counter()
 
         try:
-            output = action.handler(
+            kwargs = dict(arguments or {})
+
+            output = registered.handler(
                 context=context,
-                **arguments,
+                **kwargs,
             )
 
-            duration = perf_counter() - started
+            duration = perf_counter() - start
 
             return ExecutionResult(
                 status=StepStatus.SUCCESS,
@@ -168,7 +167,7 @@ class StepExecutor:
             )
 
         except Exception as exc:
-            duration = perf_counter() - started
+            duration = perf_counter() - start
 
             return ExecutionResult(
                 status=StepStatus.FAILED,
