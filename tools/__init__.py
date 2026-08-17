@@ -1,29 +1,27 @@
-﻿"""FACTRON Omega tools subsystem public API."""
+﻿"""FACTRON Omega Tools subsystem public API."""
 
 from .permissions import (
-    PermissionLevel,
-    ToolPermission,
+    Permission,
+    PermissionSet,
 )
 from .builtin import (
     ToolCallable,
     ToolDefinition,
-    add_tool,
+    ToolResult,
+    add,
     builtin_tools,
-    echo_tool,
+    echo,
 )
-from .registry import (
-    ToolExecutionResult,
-    ToolRegistry,
-)
+from .registry import ToolRegistry
 
 __all__ = [
-    "PermissionLevel",
-    "ToolPermission",
+    "Permission",
+    "PermissionSet",
     "ToolCallable",
     "ToolDefinition",
-    "add_tool",
+    "ToolResult",
+    "add",
     "builtin_tools",
-    "echo_tool",
-    "ToolExecutionResult",
+    "echo",
     "ToolRegistry",
 ]

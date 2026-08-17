@@ -1,14 +1,14 @@
-﻿"""Built-in deterministic tools for FACTRON Omega."""
+﻿"""Deterministic built-in tools for FACTRON Omega."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping
 
-from .permissions import PermissionLevel, ToolPermission
+from .permissions import Permission
 
 
-ToolCallable = Callable[[Mapping[str, Any]], Any]
+ToolCallable = Callable[..., Any]
 
 
 @dataclass(frozen=True, slots=True)
@@ -18,68 +18,81 @@ class ToolDefinition:
     name: str
     description: str
     handler: ToolCallable
-    permission: ToolPermission = ToolPermission(
-        level=PermissionLevel.NONE
-    )
+    permission: Permission = Permission.NONE
 
     def __post_init__(self) -> None:
-        if not self.name.strip():
-            raise ValueError("tool name cannot be empty")
+        name = self.name.strip()
+        description = self.description.strip()
 
-        if not self.description.strip():
-            raise ValueError("tool description cannot be empty")
+        if not name:
+            raise ValueError("tool name cannot be empty")
 
         if not callable(self.handler):
             raise TypeError("tool handler must be callable")
 
-        if not isinstance(self.permission, ToolPermission):
-            raise TypeError(
-                "permission must be a ToolPermission"
+        if not isinstance(self.permission, Permission):
+            raise TypeError("permission must be a Permission")
+
+        object.__setattr__(self, "name", name)
+        object.__setattr__(self, "description", description)
+
+
+@dataclass(frozen=True, slots=True)
+class ToolResult:
+    """Normalized result of a tool invocation."""
+
+    tool_name: str
+    success: bool
+    output: Any = None
+    error: str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.tool_name.strip():
+            raise ValueError("tool_name cannot be empty")
+
+        if self.success and self.error is not None:
+            raise ValueError(
+                "successful result cannot contain an error"
+            )
+
+        if not self.success and self.error is None:
+            raise ValueError(
+                "failed result must contain an error"
             )
 
 
-def echo_tool(arguments: Mapping[str, Any]) -> Any:
-    """Return the supplied value without external side effects."""
-    if not isinstance(arguments, Mapping):
-        raise TypeError("arguments must be a mapping")
-
-    return arguments.get("value")
+def echo(value: Any = None) -> Any:
+    """Return the supplied value unchanged."""
+    return value
 
 
-def add_tool(arguments: Mapping[str, Any]) -> float:
-    """Deterministically add two numeric values."""
-    if not isinstance(arguments, Mapping):
-        raise TypeError("arguments must be a mapping")
+def add(a: int | float, b: int | float) -> int | float:
+    """Add two numeric values."""
+    if isinstance(a, bool) or isinstance(b, bool):
+        raise TypeError("boolean values are not valid numeric operands")
 
-    left = arguments.get("left")
-    right = arguments.get("right")
+    if not isinstance(a, (int, float)):
+        raise TypeError("a must be int or float")
 
-    if not isinstance(left, (int, float)) or isinstance(left, bool):
-        raise TypeError("left must be numeric")
+    if not isinstance(b, (int, float)):
+        raise TypeError("b must be int or float")
 
-    if not isinstance(right, (int, float)) or isinstance(right, bool):
-        raise TypeError("right must be numeric")
-
-    return left + right
+    return a + b
 
 
 def builtin_tools() -> tuple[ToolDefinition, ...]:
-    """Return the default deterministic FACTRON tool set."""
+    """Return FACTRON's deterministic built-in tool definitions."""
     return (
         ToolDefinition(
             name="echo",
-            description="Return a supplied value.",
-            handler=echo_tool,
-            permission=ToolPermission(
-                level=PermissionLevel.NONE
-            ),
+            description="Return an input value unchanged.",
+            handler=echo,
+            permission=Permission.NONE,
         ),
         ToolDefinition(
             name="add",
             description="Add two numeric values.",
-            handler=add_tool,
-            permission=ToolPermission(
-                level=PermissionLevel.READ
-            ),
+            handler=add,
+            permission=Permission.NONE,
         ),
     )

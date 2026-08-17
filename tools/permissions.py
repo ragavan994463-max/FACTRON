@@ -1,4 +1,9 @@
-﻿"""Permission contracts for FACTRON Omega tools."""
+﻿"""FACTRON Omega tool permission contracts.
+
+Permissions are deliberately independent from concrete tool
+implementations so execution policy can evolve without coupling
+the registry to individual tools.
+"""
 
 from __future__ import annotations
 
@@ -6,7 +11,7 @@ from dataclasses import dataclass
 from enum import Enum
 
 
-class PermissionLevel(str, Enum):
+class Permission(str, Enum):
     """Logical permission levels for tool execution."""
 
     NONE = "none"
@@ -15,30 +20,33 @@ class PermissionLevel(str, Enum):
     EXECUTE = "execute"
 
 
+_PERMISSION_RANK = {
+    Permission.NONE: 0,
+    Permission.READ: 1,
+    Permission.WRITE: 2,
+    Permission.EXECUTE: 3,
+}
+
+
 @dataclass(frozen=True, slots=True)
-class ToolPermission:
-    """Immutable permission declaration for a tool."""
+class PermissionSet:
+    """Immutable permission policy for a tool."""
 
-    level: PermissionLevel = PermissionLevel.NONE
-    reason: str = ""
+    permissions: frozenset[Permission] = frozenset()
 
-    def __post_init__(self) -> None:
-        if not isinstance(self.level, PermissionLevel):
-            raise TypeError("level must be a PermissionLevel")
+    def allows(self, required: Permission) -> bool:
+        """Return whether the policy satisfies a required permission."""
+        if not isinstance(required, Permission):
+            raise TypeError("required must be a Permission")
 
-        if not isinstance(self.reason, str):
-            raise TypeError("reason must be a string")
+        if required is Permission.NONE:
+            return True
 
-    def allows(self, required: PermissionLevel) -> bool:
-        """Return whether this permission satisfies a requirement."""
-        if not isinstance(required, PermissionLevel):
-            raise TypeError("required must be a PermissionLevel")
+        return required in self.permissions
 
-        hierarchy = {
-            PermissionLevel.NONE: 0,
-            PermissionLevel.READ: 1,
-            PermissionLevel.WRITE: 2,
-            PermissionLevel.EXECUTE: 3,
-        }
-
-        return hierarchy[self.level] >= hierarchy[required]
+    def require(self, required: Permission) -> None:
+        """Raise PermissionError when permission is unavailable."""
+        if not self.allows(required):
+            raise PermissionError(
+                f"Missing required permission: {required.value}"
+            )
