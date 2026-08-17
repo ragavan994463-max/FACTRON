@@ -1,9 +1,49 @@
+﻿# ============================================
+# FACTRON Ω — GITIGNORE
+# ============================================
+
+# Runtime data
+data/raw/*
+data/processed/*
+data/memory/*
+
+# Keep directory structure
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+!data/memory/.gitkeep
 
 # Python
 __pycache__/
 *.py[cod]
 *.pyd
+*.so
+
+# Virtual environments
 .venv/
 venv/
-.env
+env/
 
+# Environment secrets
+.env
+.env.*
+!.env.example
+
+# IDE
+.vscode/
+.idea/
+
+# Operating system
+.DS_Store
+Thumbs.db
+
+# Testing / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
